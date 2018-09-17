@@ -2,6 +2,7 @@
  * LEDs driver for GPIOs
  *
  * Copyright (C) 2007 8D Technologies inc.
+ * Copyright (C) 2018 XiaoMi, Inc.
  * Raphael Assenat <raph@8d.com>
  * Copyright (C) 2008 Freescale Semiconductor, Inc.
  * Copyright (C) 2018 XiaoMi, Inc.
@@ -32,10 +33,20 @@
 #define JUSTTIMES 6
 #define JUST_DELAY 6
 
+#define HRTIME_JUST_DELAY 9000
+
+
+
+#ifndef USE_HRTIMER_SIMULATION
 static s64 dealt;
+#else
+static s64 adjust_dealt;
+
+#endif
 
 static DEFINE_SPINLOCK(infrared_lock);
 struct pm_qos_request infrared_qos_req;
+
 
 struct gpio_ir_tx_packet {
 	struct completion done;
@@ -65,9 +76,14 @@ struct gpio_led_data {
 
 struct mutex ir_lock;
 
+
+#if defined (WT_USE_FAN54015)
+extern int fan54015_getcharge_stat(void);
+#endif
+
 static void gpio_led_work(struct work_struct *work)
 {
-	struct gpio_led_data *led_dat =
+	struct gpio_led_data	*led_dat =
 		container_of(work, struct gpio_led_data, work);
 
 	if (led_dat->blinking) {
@@ -112,6 +128,7 @@ static void gpio_led_set(struct led_classdev *led_cdev,
 			if (ret) {
 				printk("infrared unable to set dir for gpio [%d]\n", led_dat->gpio);
 			}
+
 	}
 }
 
@@ -172,6 +189,7 @@ static enum hrtimer_restart gpio_ir_tx_timer(struct hrtimer *timer)
 			delay_ns = gpkt->buffer[gpkt->next++] * NSEC_PER_USEC;
 		} else { /* pulse with soft carrier */
 
+
 #if 1
 			unsigned int usecs;
 
@@ -225,6 +243,9 @@ static int gpio_ir_tx_transmit_with_timer(struct gpio_ir_tx_packet *gpkt)
 
 	hrtimer_init(&gpkt->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
 	gpkt->timer.function = gpio_ir_tx_timer;
+
+
+
 
 	hrtimer = hrtimer_is_hres_active(&gpkt->timer);
 
@@ -305,6 +326,8 @@ static long pwm_ir_tx_work(void *arg)
 
 static int gpio_ir_tx_transmit_with_delay(struct gpio_ir_tx_packet *gpkt)
 {
+
+
 	int cpu, rc = -ENODEV;
 	int try_again = JUSTTIMES;
 
@@ -318,6 +341,10 @@ static int gpio_ir_tx_transmit_with_delay(struct gpio_ir_tx_packet *gpkt)
 
 	if (dealt > JUST_DELAY)
 		goto out;
+
+
+
+
 
 	for_each_online_cpu(cpu)
 	{
@@ -361,6 +388,7 @@ static ssize_t transmit_store(struct device *dev,
 	struct gpio_led_data *led_dat =
 		container_of(led_cdev, struct gpio_led_data, cdev);
 
+
 	mutex_lock(&ir_lock);
 
 	carrier = temp_buf[0];
@@ -385,6 +413,7 @@ static ssize_t transmit_store(struct device *dev,
 #endif
 	pm_qos_update_request(&infrared_qos_req, PM_QOS_DEFAULT_VALUE);
 
+
 	mutex_unlock(&ir_lock);
 
 	return rc;
@@ -396,6 +425,9 @@ static int create_gpio_led(const struct gpio_led *template,
 	int (*blink_set)(unsigned, int, unsigned long *, unsigned long *))
 {
 	int ret, state;
+#if defined (WT_USE_FAN54015)
+	int chg_status;
+#endif
 
 	led_dat->gpio = -1;
 
@@ -405,7 +437,6 @@ static int create_gpio_led(const struct gpio_led *template,
 				template->gpio, template->name);
 		return 0;
 	}
-
 	ret = devm_gpio_request(parent, template->gpio, template->name);
 	if (ret < 0)
 		return ret;
@@ -429,10 +460,20 @@ static int create_gpio_led(const struct gpio_led *template,
 	if (!template->retain_state_suspended)
 		led_dat->cdev.flags |= LED_CORE_SUSPENDRESUME;
 
+#if defined (WT_USE_FAN54015)
+	chg_status = fan54015_getcharge_stat();
+	if (!strcmp(template->name, "red")) {
+		if ((chg_status & 0x1) != 0x1) {
+			ret = gpio_direction_output(led_dat->gpio, led_dat->active_low ^ state);
+			if (ret < 0)
+				return ret;
+		}
+	}
+#else
 	ret = gpio_direction_output(led_dat->gpio, led_dat->active_low ^ state);
 	if (ret < 0)
 		return ret;
-
+#endif
 	INIT_WORK(&led_dat->work, gpio_led_work);
 
 	ret = led_classdev_register(parent, &led_dat->cdev);
@@ -537,6 +578,7 @@ static struct gpio_leds_priv *gpio_leds_create_of(struct platform_device *pdev)
 	return ERR_PTR(-ENODEV);
 }
 #endif /* CONFIG_OF_GPIO */
+
 
 static int gpio_led_probe(struct platform_device *pdev)
 {
